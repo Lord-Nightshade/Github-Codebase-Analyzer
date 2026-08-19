@@ -1,5 +1,5 @@
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from langchain_core.messages import SystemMessage, HumanMessage
 
 from config import MODEL_NAME
 from agents.state import ReviewState
@@ -10,6 +10,23 @@ from vector_store.ephemeral_store import EphemeralCodebaseStore
 llm = ChatGoogleGenerativeAI(model=MODEL_NAME, temperature=0.2)
 
 
+def _extract_text(content) -> str:
+    """Safely extracts a single string from raw LLM output or state variables."""
+    if isinstance(content, str):
+        return content
+    elif isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and "text" in item:
+                parts.append(str(item["text"]))
+            else:
+                parts.append(str(item))
+        return "\n".join(parts)
+    return str(content) if content is not None else ""
+
+
 def supervisor_node(state: ReviewState) -> dict:
     """
     Supervisor Agent that manages workflow state, delegates sub-tasks,
@@ -17,7 +34,7 @@ def supervisor_node(state: ReviewState) -> dict:
     """
     status = state.get("review_status", "IN_PROGRESS")
     guidelines = state.get("guidelines", [])
-    analysis_draft = state.get("analysis_draft", "")
+    analysis_draft = _extract_text(state.get("analysis_draft", ""))
     iteration_count = state.get("iteration_count", 0)
 
     # 1. First Pass: Fetch Architecture Rules
@@ -39,21 +56,25 @@ def supervisor_node(state: ReviewState) -> dict:
 
     # 5. Final Synthesis Pass: Build Final Markdown Report
     print("Supervisor: Analysis approved or max retries reached. Synthesizing final report...")
+    
+    guidelines_formatted = _extract_text(guidelines)
+    reviewer_critique = _extract_text(state.get("reviewer_critique", "None"))
+
     system_prompt = SystemMessage(
         content="You are a Principal Software Architect. Synthesize the code analysis findings and "
                 "reviewer critique into a structured, highly actionable Markdown review report."
     )
     user_prompt = HumanMessage(
         content=f"Tech Stack: {state.get('tech_stack')}\n"
-                f"Architecture Rules applied:\n{guidelines}\n\n"
+                f"Architecture Rules applied:\n{guidelines_formatted}\n\n"
                 f"Code Analysis Draft:\n{analysis_draft}\n\n"
-                f"Reviewer Critique:\n{state.get('reviewer_critique', 'None')}"
+                f"Reviewer Critique:\n{reviewer_critique}"
     )
 
     response = llm.invoke([system_prompt, user_prompt])
     
     return {
-        "final_report": response.content,
+        "final_report": _extract_text(response.content),
         "next_step": "END"
     }
 
@@ -80,11 +101,10 @@ def code_analyzer_node(state: ReviewState) -> dict:
     session_id = state.get("session_id")
     tech_stack = state.get("tech_stack")
     guidelines = state.get("guidelines", [])
-    critique = state.get("reviewer_critique", "")
+    critique = _extract_text(state.get("reviewer_critique", ""))
 
     print(f"Code Analyzer Agent: Inspecting repository vectors for session [{session_id}]...")
 
-    # Fetch code chunks from session vector store
     ephemeral_store = EphemeralCodebaseStore(session_id=session_id)
     relevant_chunks = ephemeral_store.query_codebase(
         query_text=f"Controllers, Services, Repositories, API endpoints, error handling, and architecture in {tech_stack}",
@@ -95,6 +115,8 @@ def code_analyzer_node(state: ReviewState) -> dict:
         [f"--- File: {c['file_path']} ---\n{c['content']}" for c in relevant_chunks]
     )
 
+    guidelines_formatted = _extract_text(guidelines)
+
     system_prompt = SystemMessage(
         content="You are a Senior Code Auditor. Review the provided source code against the target "
                 "architecture guidelines. Identify architecture smells, SRP violations, security risks, "
@@ -104,7 +126,7 @@ def code_analyzer_node(state: ReviewState) -> dict:
     revision_context = f"\nPrevious Critique to Fix:\n{critique}" if critique else ""
     user_prompt = HumanMessage(
         content=f"Target Tech Stack: {tech_stack}\n"
-                f"Guidelines to Enforce:\n{guidelines}\n\n"
+                f"Guidelines to Enforce:\n{guidelines_formatted}\n\n"
                 f"Source Code Samples:\n{code_context}"
                 f"{revision_context}"
     )
@@ -112,15 +134,15 @@ def code_analyzer_node(state: ReviewState) -> dict:
     response = llm.invoke([system_prompt, user_prompt])
 
     return {
-        "analysis_draft": response.content,
+        "analysis_draft": _extract_text(response.content),
         "next_step": "supervisor"
     }
 
 
 def final_reviewer_node(state: ReviewState) -> dict:
     """Quality gate node that evaluates the code analysis draft for accuracy and completeness."""
-    analysis_draft = state.get("analysis_draft", "")
-    guidelines = state.get("guidelines", [])
+    analysis_draft = _extract_text(state.get("analysis_draft", ""))
+    guidelines = _extract_text(state.get("guidelines", []))
     current_iterations = state.get("iteration_count", 0)
 
     print("Final Reviewer Agent: Running Quality Gate evaluation...")
@@ -133,15 +155,18 @@ def final_reviewer_node(state: ReviewState) -> dict:
     user_prompt = HumanMessage(
         content=f"Guidelines:\n{guidelines}\n\n"
                 f"Analysis Draft:\n{analysis_draft}\n\n"
-                "Provide your evaluation in format:\n"
-                "STATUS: [APPROVED or REJECTED]\n"
-                "CRITIQUE: [Your detailed feedback]"
+                f"Provide your evaluation in format:\n"
+                f"STATUS: [APPROVED or REJECTED]\n"
+                f"CRITIQUE: [Your detailed feedback]"
     )
 
     response = llm.invoke([system_prompt, user_prompt])
-    text = response.content
+    text = _extract_text(response.content)
 
-    if "STATUS: APPROVED" in text or "APPROVED" in text.split("\n")[0]:
+    # Safe to call split now that text is guaranteed to be a string
+    first_line = text.split("\n")[0] if text else ""
+
+    if "STATUS: APPROVED" in text or "APPROVED" in first_line:
         status = "APPROVED"
         critique = "Analysis approved by Quality Gate."
     else:
