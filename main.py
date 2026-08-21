@@ -90,12 +90,12 @@ def main():
         print("\nYou can now ask follow-up questions about this repository.")
         print("Type 'exit' or 'quit' to terminate session and purge memory.\n")
 
-        llm = ChatGoogleGenerativeAI(model=MODEL_NAME, temperature=0.2)
+        llm = ChatGoogleGenerativeAI(model=MODEL_NAME, temperature=0.5)
 
         # Base System Prompt containing Defensive Framing + Initial Report Context
         system_instruction = SystemMessage(
             content=(
-                "You are an expert Defensive Software Architect helping a developer improve their application's "
+                "You are an expert Software Architect helping a developer improve their application's "
                 "design, resilience, and coding practices.\n"
                 "You are reviewing source code for standard software engineering quality, design patterns, "
                 "and architectural improvements.\n\n"
